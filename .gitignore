@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+/*.csv
+sample_day*.csv
+cleaned/
+merged.csv
+*.kml
+*.geojson
+*.json
+.DS_Store

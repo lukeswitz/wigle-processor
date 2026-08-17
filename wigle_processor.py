@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WiGLE CSV Processor — wardriving analysis toolkit
+WiGLE CSV Processor — OPSEC and analysis tool for WiGLE CSV files
 
 Home/device scrubbing, multi-CSV merge/dedup, OUI vendor lookup, creep and
 evil-twin detection, encryption+channel stats, time-on-air, KML/GeoJSON maps.
@@ -11,11 +11,14 @@ EXAMPLES:
   # interactive menu (no flags)
   python3 wigle_processor.py
 
-  # clean before upload: strip home + block your own devices (home coords live in filter.json)
-  python3 wigle_processor.py *.csv --scrub --exclude-home --config filter.json
+  # clean before upload: strips home + your own devices (home coords live in filter.json)
+  python3 wigle_processor.py *.csv --scrub
 
   # same, but give the home coords inline instead of a config file
-  python3 wigle_processor.py *.csv --scrub --exclude-home --lat YOUR_LAT --lon YOUR_LON
+  python3 wigle_processor.py *.csv --scrub --lat YOUR_LAT --lon YOUR_LON
+
+  # clean everything except the home radius
+  python3 wigle_processor.py *.csv --scrub --keep-home
 
   # one analysis pass: creeps, evil twins, and every stat
   python3 wigle_processor.py *.csv --creeps --evil-twins --encryption --channels --vendor-stats --time-analysis
@@ -852,7 +855,11 @@ def _resolve_files(args) -> list[str]:
         entry = _ask("No CSV files here. Type a filename or pattern like *.csv: ")
     if entry:
         globbed = sorted(str(p) for p in Path(".").glob(entry))
-        return globbed or ([entry] if os.path.exists(entry) else [])
+        if globbed:
+            return globbed
+        if os.path.exists(entry):
+            return [entry]
+        print(f"  Nothing matches {entry!r}.")
     return found
 
 
@@ -878,7 +885,7 @@ def _home_leak(records: list[WiGLERecord], lat: float, lon: float, radius_m: flo
 
 def _warn_home_leak(count: int, radius_m: float) -> None:
     print(f"\n!! WARNING: {count} network(s) within ~{int(radius_m)} m of your home are still in "
-          f"this output. Use --exclude-home (menu option 1) before sharing or uploading.")
+          f"this output. Drop --keep-home before sharing or uploading.")
 
 
 _REMOVAL_LABELS = {
@@ -1061,7 +1068,7 @@ def interactive_session(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="WiGLE CSV Processor — wardriving analysis toolkit",
+        description="WiGLE CSV Processor — OPSEC and analysis tool for WiGLE CSV files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__[__doc__.find("Flags combine"):] if "Flags combine" in __doc__ else None,
     )
@@ -1080,7 +1087,9 @@ def main() -> None:
 
     geo = parser.add_argument_group("location (hide where you live / were)")
     geo.add_argument("--exclude-home", "--not-here", dest="not_here", action="store_true",
-                     help="Drop networks near --lat/--lon (hide your home before sharing)")
+                     help="Drop networks near --lat/--lon (now the default; kept for old commands)")
+    geo.add_argument("--keep-home", action="store_true",
+                     help="Do NOT drop networks near your home coordinates")
     geo.add_argument("--lat", type=float, help="Your reference latitude (e.g. home)")
     geo.add_argument("--lon", type=float, help="Your reference longitude (e.g. home)")
 
@@ -1162,7 +1171,9 @@ def main() -> None:
     scrub_kept = 0
     scrub_total = 0
 
-    location_mode = "not_here" if args.not_here else None
+    location_mode = None if args.keep_home else "not_here"
+    if args.keep_home and processor.location_filter is not None:
+        print("--keep-home: networks near your home stay in the output.")
 
     for filename in input_files:
         print(f"Reading {filename}...")
@@ -1181,7 +1192,7 @@ def main() -> None:
 
     if args.scrub or sum(scrub_stats.values()):
         _print_removal_stats(scrub_stats, scrub_kept, scrub_total)
-        if args.not_here and processor.location_filter is not None:
+        if location_mode == "not_here" and processor.location_filter is not None:
             _warn_home_nomatch(scrub_stats["home"], scrub_total)
 
     print(f"\nTotal records loaded: {len(all_records)}")
@@ -1255,8 +1266,7 @@ def main() -> None:
         home_r = processor.filter_config.radius_m
 
     shared_output = bool(
-        args.merge or args.export_geojson or args.export_kml
-        or (args.scrub and not args.not_here)
+        args.merge or args.export_geojson or args.export_kml or args.scrub
     )
     if home_lat is not None and shared_output:
         leak = _home_leak(all_records, home_lat, home_lon, home_r)

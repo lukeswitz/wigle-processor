@@ -237,6 +237,16 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # Analyzers — all original method names preserved exactly
 # ---------------------------------------------------------------------------
 
+def band_for(channel: str) -> str:
+    try:
+        ch = int(channel)
+    except ValueError:
+        return channel
+    if ch == 0:
+        return "BLE"
+    return "2.4 GHz" if ch <= 14 else "5 GHz"
+
+
 class ChannelAnalyzer:
     def __init__(self) -> None:
         self.channel_counts: Counter = Counter()
@@ -249,18 +259,10 @@ class ChannelAnalyzer:
             return
         self.unique_networks.add(network_id)
 
-        ch = record.channel
-        if ch == "0":
-            ch = "BLE" if record.network_type.upper() not in ("WIFI", "") else "0"
-
+        ch = "BLE" if record.channel == "0" else record.channel
         self.channel_counts[ch] += 1
 
-        try:
-            ch_int = int(ch)
-            band = "2.4 GHz" if ch_int <= 14 else "5 GHz"
-        except ValueError:
-            band = ch
-        self._band_map.setdefault(band, []).append(ch)
+        self._band_map.setdefault(band_for(ch), []).append(ch)
 
     def get_stats(self, top_n: int = 20) -> dict[str, dict[str, float]]:
         total = sum(self.channel_counts.values())
@@ -268,28 +270,18 @@ class ChannelAnalyzer:
             return {}
         stats: dict[str, dict[str, float]] = {}
         for channel, count in self.channel_counts.most_common(top_n):
-            try:
-                ch_int = int(channel)
-                band = "2.4 GHz" if ch_int <= 14 else "5 GHz"
-            except ValueError:
-                band = channel
             stats[channel] = {
                 "count": count,
                 "percentage": (count / total) * 100,
                 "total": total,
-                "band": band,
+                "band": band_for(channel),
             }
         return stats
 
     def band_summary(self) -> dict[str, int]:
         summary: dict[str, int] = defaultdict(int)
         for ch, count in self.channel_counts.items():
-            try:
-                ch_int = int(ch)
-                band = "2.4 GHz" if ch_int <= 14 else "5 GHz"
-            except ValueError:
-                band = ch
-            summary[band] += count
+            summary[band_for(ch)] += count
         return dict(summary)
 
 
@@ -375,11 +367,15 @@ class VendorAnalyzer:
     def __init__(self) -> None:
         self.vendor_counts: Counter = Counter()
         self.seen: set[str] = set()
+        self.randomized = 0
 
     def add_record(self, record: WiGLERecord) -> None:
         if record.mac in self.seen:
             return
         self.seen.add(record.mac)
+        if _is_locally_administered(record.mac):
+            self.randomized += 1
+            return
         self.vendor_counts[lookup_vendor(record.mac)] += 1
 
     def get_stats(self, top_n: int = 20) -> dict[str, dict]:
@@ -433,9 +429,9 @@ class RogueDetector:
 
             suspicion = []
             if has_open and has_secured:
-                suspicion.append("open clone of a secured network")
+                suspicion.append("open clone")
             if len(global_vendors) > 1:
-                suspicion.append(f"different hardware vendors ({', '.join(sorted(global_vendors))})")
+                suspicion.append("mixed vendors")
             if not suspicion:
                 continue
 
@@ -780,6 +776,8 @@ def print_vendor_stats(analyzer: VendorAnalyzer, top_n: int = 20) -> None:
     print_separator(55)
     for vendor, data in stats.items():
         print(f"{vendor:<30} {data['percentage']:>8.2f}%   {data['count']}")
+    if analyzer.randomized:
+        print(f"\n  {analyzer.randomized} randomized MACs excluded — no vendor to look up.")
 
 
 def print_evil_twins(detector: RogueDetector) -> None:
@@ -822,6 +820,7 @@ def _ask(prompt: str, default: str = "") -> str:
     try:
         val = input(prompt).strip()
     except EOFError:
+        print()
         return default
     return val or default
 
@@ -952,6 +951,7 @@ def _clean_drive(processor: "WiGLEProcessor", files: list[str], home: Optional[t
     if home:
         processor.set_location_filter(home[0], home[1], home[2])
     out_dir = _ask("Save cleaned copies where (default cleaned): ", "cleaned")
+    print()
     stats: Counter = Counter()
     kept = total = 0
     for f in files:
@@ -1049,12 +1049,14 @@ def interactive_session(args) -> None:
             print_time_analysis(a)
         elif choice == "8":
             out = _ask("Output file (default merged.csv): ", "merged.csv")
+            print()
             merged = processor.merge_and_dedup(all_records)
             header = ["MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,"
                       "CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n"]
             processor.write_csv_file(out, header, merged)
-            print(f"Merged/deduped: {len(merged)} unique -> {out} "
-                  f"({len(all_records) - len(merged)} duplicates removed)")
+            dupes = len(all_records) - len(merged)
+            print(f"Wrote {out}: {len(merged)} unique networks, "
+                  f"{dupes} duplicate{'' if dupes == 1 else 's'} removed.")
             if session_home:
                 leak = _home_leak(merged, *session_home)
                 if leak:
@@ -1204,8 +1206,9 @@ def main() -> None:
             "CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n"
         ]
         processor.write_csv_file(args.merge, header_line, merged)
-        print(f"Merged/deduped: {len(merged)} unique records -> {args.merge}")
-        print(f"  Duplicates removed: {len(all_records) - len(merged)}")
+        dupes = len(all_records) - len(merged)
+        print(f"Wrote {args.merge}: {len(merged)} unique networks, "
+              f"{dupes} duplicate{'' if dupes == 1 else 's'} removed.")
 
     if args.export_kml:
         export_kml(all_records, args.export_kml)

@@ -2,8 +2,8 @@
 """
 WiGLE CSV Processor — wardriving analysis toolkit
 
-Multi-CSV merge/dedup, OUI vendor lookup, creep/evil-twin detection,
-KML/GeoJSON/JSON/CSV export, encryption+channel stats, time-on-air analysis.
+Home/device scrubbing, multi-CSV merge/dedup, OUI vendor lookup, creep and
+evil-twin detection, encryption+channel stats, time-on-air, KML/GeoJSON maps.
 
 Flags combine — do several things in one run.
 
@@ -36,7 +36,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, Counter
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -497,20 +497,16 @@ class TimeAnalyzer:
 # ---------------------------------------------------------------------------
 
 class LocationFilter:
-    def __init__(self, my_lat: float, my_long: float, delta: float = 0.001) -> None:
+    def __init__(self, my_lat: float, my_long: float, radius_m: float = 150.0) -> None:
         self.my_lat = my_lat
         self.my_long = my_long
-        self.delta = delta
-        self.lat_min = my_lat - delta
-        self.lat_max = my_lat + delta
-        self.long_min = my_long - delta
-        self.long_max = my_long + delta
+        self.radius_m = radius_m
 
     def is_here(self, record: WiGLERecord) -> bool:
         if not record.has_gps:
             return False
-        return (self.lat_min <= record.latitude <= self.lat_max and
-                self.long_min <= record.longitude <= self.long_max)
+        return haversine_m(self.my_lat, self.my_long,
+                           record.latitude, record.longitude) <= self.radius_m
 
     def is_not_here(self, record: WiGLERecord) -> bool:
         if not record.has_gps:
@@ -579,28 +575,6 @@ class FilterConfig:
         print(f"Sample configuration created: {config_file}")
 
 
-# ---------------------------------------------------------------------------
-# Export helpers
-# ---------------------------------------------------------------------------
-
-def export_csv(records: list[WiGLERecord], path: str) -> None:
-    header = ["MAC", "SSID", "AuthMode", "FirstSeen", "Channel", "RSSI",
-              "CurrentLatitude", "CurrentLongitude", "AltitudeMeters", "AccuracyMeters", "Type"]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for r in records:
-            writer.writerow(r.to_row())
-    print(f"CSV export: {path} ({len(records)} records)")
-
-
-def export_json(records: list[WiGLERecord], path: str) -> None:
-    data = [asdict(r) for r in records]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    print(f"JSON export: {path} ({len(records)} records)")
-
-
 def export_geojson(records: list[WiGLERecord], path: str) -> None:
     features = []
     for r in records:
@@ -662,8 +636,8 @@ class WiGLEProcessor:
         self.location_filter: Optional[LocationFilter] = None
         self.filter_config: Optional[FilterConfig] = None
 
-    def set_location_filter(self, lat: float, lon: float, delta: float = 0.001) -> None:
-        self.location_filter = LocationFilter(lat, lon, delta)
+    def set_location_filter(self, lat: float, lon: float, radius_m: float = 150.0) -> None:
+        self.location_filter = LocationFilter(lat, lon, radius_m)
 
     def set_filter_config(self, config_file: str) -> None:
         self.filter_config = FilterConfig(config_file)
@@ -892,13 +866,13 @@ What do you want to do?
    6) Device makers (vendors)
    7) Busiest times
    8) Merge several drives into one
-   9) Export to a map / JSON / CSV
+   9) Export a map (KML for Google Earth, GeoJSON for QGIS)
    0) Quit
 """
 
 
 def _home_leak(records: list[WiGLERecord], lat: float, lon: float, radius_m: float) -> int:
-    lf = LocationFilter(lat, lon, radius_m / _M_PER_DEG)
+    lf = LocationFilter(lat, lon, radius_m)
     return sum(1 for r in records if lf.is_here(r))
 
 
@@ -969,8 +943,8 @@ def _setup_privacy(processor: "WiGLEProcessor") -> Optional[tuple]:
 def _clean_drive(processor: "WiGLEProcessor", files: list[str], home: Optional[tuple]) -> None:
     location_mode = "not_here" if home else None
     if home:
-        processor.set_location_filter(home[0], home[1], home[2] / _M_PER_DEG)
-    out_dir = _ask("Save cleaned copies where (default ./cleaned): ", "./cleaned")
+        processor.set_location_filter(home[0], home[1], home[2])
+    out_dir = _ask("Save cleaned copies where (default cleaned): ", "cleaned")
     stats: Counter = Counter()
     kept = total = 0
     for f in files:
@@ -988,15 +962,11 @@ def _clean_drive(processor: "WiGLEProcessor", files: list[str], home: Optional[t
 
 
 def _menu_export(records: list[WiGLERecord]) -> None:
-    fmt = _ask("Format — (k)ml / (g)eojson / (j)son / (c)sv: ").lower()
+    fmt = _ask("Format — (k)ml for Google Earth / (g)eojson for QGIS: ").lower()
     if fmt.startswith("k"):
-        export_kml(records, _ask("Output file (default out.kml): ", "out.kml"))
+        export_kml(records, _ask("Output file (default map.kml): ", "map.kml"))
     elif fmt.startswith("g"):
-        export_geojson(records, _ask("Output file (default out.geojson): ", "out.geojson"))
-    elif fmt.startswith("j"):
-        export_json(records, _ask("Output file (default out.json): ", "out.json"))
-    elif fmt.startswith("c"):
-        export_csv(records, _ask("Output file (default out.csv): ", "out.csv"))
+        export_geojson(records, _ask("Output file (default map.geojson): ", "map.geojson"))
     else:
         print("  Unknown format.")
 
@@ -1018,6 +988,14 @@ def interactive_session(args) -> None:
         return
 
     session_home = _setup_privacy(processor)
+    if session_home:
+        processor.set_location_filter(session_home[0], session_home[1], session_home[2])
+    drop_stats: Counter = Counter()
+    total_loaded = len(all_records)
+    all_records = processor.filter_records(all_records, "not_here" if session_home else None, drop_stats)
+    if sum(drop_stats.values()):
+        _print_removal_stats(drop_stats, len(all_records), total_loaded)
+        print("Everything below runs on what's left.")
 
     while True:
         print(MENU)
@@ -1076,10 +1054,6 @@ def interactive_session(args) -> None:
                     _warn_home_leak(leak, session_home[2])
         elif choice == "9":
             _menu_export(all_records)
-            if session_home:
-                leak = _home_leak(all_records, *session_home)
-                if leak:
-                    _warn_home_leak(leak, session_home[2])
         else:
             print("  Unknown option.")
         _ask("\nPress Enter to continue...")
@@ -1096,7 +1070,7 @@ def main() -> None:
                         help="Interactive walkthrough menu (default when no operation is given)")
 
     ops = parser.add_argument_group("operations")
-    ops.add_argument("--scrub", action="store_true", help="Write cleaned copies to ./cleaned/ (home/own devices removed)")
+    ops.add_argument("--scrub", action="store_true", help="Write cleaned copies to cleaned/ (home/own devices removed)")
     ops.add_argument("--creeps", action="store_true", help="Find MACs seen at multiple locations")
     ops.add_argument("--encryption", action="store_true", help="Show encryption type breakdown")
     ops.add_argument("--channels", action="store_true", help="Show channel usage statistics")
@@ -1118,12 +1092,10 @@ def main() -> None:
     flt.add_argument("--top", type=int, default=20, help="Number of top results to show (default: 20)")
 
     out = parser.add_argument_group("output")
-    out.add_argument("--output-dir", default="./cleaned", help="Folder for cleaned copies (default: ./cleaned)")
+    out.add_argument("--output-dir", default="cleaned", help="Folder for cleaned copies (default: cleaned)")
     out.add_argument("--merge", metavar="FILE", help="Merge all inputs, dedup, write to FILE")
-    out.add_argument("--export-csv", metavar="FILE", help="Export all (filtered) records as CSV")
-    out.add_argument("--export-json", metavar="FILE", help="Export all records as JSON")
-    out.add_argument("--export-geojson", metavar="FILE", help="Export as GeoJSON FeatureCollection")
-    out.add_argument("--export-kml", metavar="FILE", help="Export as KML (Google Earth)")
+    out.add_argument("--export-kml", metavar="FILE", help="Map export for Google Earth")
+    out.add_argument("--export-geojson", metavar="FILE", help="Map export for QGIS and web maps")
 
     args = parser.parse_args()
 
@@ -1135,7 +1107,7 @@ def main() -> None:
     op_selected = any([
         args.scrub, args.creeps, args.encryption, args.channels, args.evil_twins,
         args.vendor_stats, args.time_analysis, args.merge,
-        args.export_csv, args.export_json, args.export_geojson, args.export_kml,
+        args.export_kml, args.export_geojson,
     ])
     if args.menu or not op_selected:
         interactive_session(args)
@@ -1173,7 +1145,7 @@ def main() -> None:
     processor = WiGLEProcessor()
 
     if args.lat is not None and args.lon is not None:
-        processor.set_location_filter(args.lat, args.lon, 150.0 / _M_PER_DEG)
+        processor.set_location_filter(args.lat, args.lon, 150.0)
 
     if config_to_use:
         processor.set_filter_config(config_to_use)
@@ -1181,7 +1153,7 @@ def main() -> None:
         print(f"Config: lat={cfg.latitude}, lon={cfg.longitude}, radius={cfg.radius_m}m")
         if cfg.latitude is not None and cfg.longitude is not None:
             if processor.location_filter is None:
-                processor.set_location_filter(cfg.latitude, cfg.longitude, cfg.radius_m / _M_PER_DEG)
+                processor.set_location_filter(cfg.latitude, cfg.longitude, cfg.radius_m)
             print("Location filter set from config.")
 
     all_records: list[WiGLERecord] = []
@@ -1190,23 +1162,24 @@ def main() -> None:
     scrub_kept = 0
     scrub_total = 0
 
+    location_mode = "not_here" if args.not_here else None
+
     for filename in input_files:
         print(f"Reading {filename}...")
         headers, records = processor.read_csv_file(filename)
         if headers and not canonical_headers:
             canonical_headers = headers
-        all_records.extend(records)
+        filtered = processor.filter_records(records, location_mode, scrub_stats)
+        all_records.extend(filtered)
+        scrub_kept += len(filtered)
+        scrub_total += len(records)
 
         if args.scrub:
-            location_mode = "not_here" if args.not_here else None
-            filtered = processor.filter_records(records, location_mode, scrub_stats)
-            scrub_kept += len(filtered)
-            scrub_total += len(records)
             out_file = Path(args.output_dir) / Path(filename).name
             processor.write_csv_file(str(out_file), headers, filtered)
             print(f"Scrubbed {filename} -> {out_file} ({len(filtered)}/{len(records)} records)")
 
-    if args.scrub:
+    if args.scrub or sum(scrub_stats.values()):
         _print_removal_stats(scrub_stats, scrub_kept, scrub_total)
         if args.not_here and processor.location_filter is not None:
             _warn_home_nomatch(scrub_stats["home"], scrub_total)
@@ -1223,17 +1196,11 @@ def main() -> None:
         print(f"Merged/deduped: {len(merged)} unique records -> {args.merge}")
         print(f"  Duplicates removed: {len(all_records) - len(merged)}")
 
-    if args.export_csv:
-        export_csv(all_records, args.export_csv)
-
-    if args.export_json:
-        export_json(all_records, args.export_json)
+    if args.export_kml:
+        export_kml(all_records, args.export_kml)
 
     if args.export_geojson:
         export_geojson(all_records, args.export_geojson)
-
-    if args.export_kml:
-        export_kml(all_records, args.export_kml)
 
     if args.creeps:
         print("\nRunning creep detection...")
@@ -1288,8 +1255,7 @@ def main() -> None:
         home_r = processor.filter_config.radius_m
 
     shared_output = bool(
-        args.merge or args.export_csv or args.export_json
-        or args.export_geojson or args.export_kml
+        args.merge or args.export_geojson or args.export_kml
         or (args.scrub and not args.not_here)
     )
     if home_lat is not None and shared_output:

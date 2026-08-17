@@ -1,11 +1,11 @@
 # WiGLE CSV Processor
 
-OPSEC and analysis tool for WiGLE CSV files.
+#### OPSEC and analysis tool for WiGLE CSV files.
 
-Your drive starts and ends at your house. This strips that out before you share the file, then
+> Your drive starts and ends at your house. This strips that out before you share the file, then
 tells you what else the drive picked up.
 
-Python 3.10+, standard library only.
+**Requirements: `Python 3.10+, standard library only`**
 
 ## Get started
 
@@ -15,8 +15,12 @@ cd wigle-processor
 python3 wigle_processor.py
 ```
 
-Run it in the folder holding your CSVs. It finds them, asks what to keep private, and saves
-your answers to `filter.json` for every run after.
+- Run it in a folder holding your CSVs, or point to them with the script.
+- Use flags or run the script on its own for an interactive menu.
+
+> [!NOTE]
+> A `filter.json` file is created on first run, used for every run after (mod it as needed,
+> write a fresh template with `--create-config filter.json`):
 
 ```
 Your home latitude (blank to skip):
@@ -30,8 +34,7 @@ Results: kept 18 of 20 records, removed 2.
         1  near your home location
 ```
 
-That radius is a circle and it removes **every** network inside it, not just yours — leaving
-the neighbors in still marks the spot.
+The radius is a circle. It removes every network inside it, not just yours.
 
 Then the menu:
 
@@ -78,12 +81,13 @@ Encryption                 Pct     Count / Total
 ```
 Channel    Band             Pct     Count / Total
 11         2.4 GHz       16.67%        2/12
+BLE        BLE           16.67%        2/12
 36         5 GHz          8.33%        1/12
 
   Band summary:
-    2.4 GHz: 7
+    2.4 GHz: 6
     5 GHz: 4
-    BLE: 1
+    BLE: 2
 ```
 
 ### 5 — Evil twins / rogue APs
@@ -98,8 +102,10 @@ Channel    Band             Pct     Count / Total
 
 ```
 Vendor                               Pct   Count
-NETGEAR                           25.00%   3
-Ubiquiti Inc                      16.67%   2
+NETGEAR                           27.27%   3
+Ubiquiti Inc                      18.18%   2
+
+  1 randomized MACs excluded — no vendor to look up.
 ```
 
 ### 7 — Busiest times
@@ -115,7 +121,7 @@ Ubiquiti Inc                      16.67%   2
 ### 8 — Merge several drives into one
 
 ```
-Merged/deduped: 17 unique -> merged.csv (1 duplicates removed)
+Wrote merged.csv: 17 unique networks, 1 duplicate removed.
 ```
 
 ### 9 — Export a map
@@ -137,8 +143,7 @@ KML export: map.kml (17 geolocated records)
 }
 ```
 
-MACs and SSIDs match exactly, patterns are regexes tested against both. `--create-config FILE`
-writes this template.
+MACs and SSIDs match exactly. Patterns are regexes, tested against both.
 
 ## Without the menu
 
@@ -149,15 +154,22 @@ python3 wigle_processor.py *.csv --creeps --evil-twins        # flags combine
 python3 wigle_processor.py d1.csv d2.csv --merge all.csv --export-kml map.kml
 ```
 
+Any flag skips the menu.
+
 | Flag | |
 |---|---|
+| `FILE...` | CSVs to read. Omit for every `.csv` in the current folder. |
+| `-i`, `--interactive`, `--menu` | Force the menu even with other flags set. |
 | `--scrub` | Cleaned copies into `cleaned/`. Removes the home radius unless `--keep-home`. |
 | `--keep-home` | Leave home in. Warns when it does. |
-| `--lat`, `--lon` | Overrides the config coordinates. |
-| `--config FILE` | Default `filter.json`. |
+| `--exclude-home`, `--not-here` | Drop the home radius. Now the default; accepted so older commands still run. |
+| `--lat`, `--lon` | Home coordinates with a fixed 150 m radius. Overrides the config. |
+| `--config FILE` | Load a config. Default `filter.json`. |
+| `--create-config FILE` | Write a config template and exit. |
 | `--output-dir DIR` | Default `cleaned`. |
-| `--creeps` `--evil-twins` `--encryption` `--channels` `--vendor-stats` `--time-analysis` | Menu 2–7. |
+| `--creeps` | Menu 2. |
 | `--min-locs N` | Stops before a device counts as a creep. Default 3. |
+| `--encryption` `--channels` `--evil-twins` `--vendor-stats` `--time-analysis` | Menu 3–7. |
 | `--merge FILE` | Merge and deduplicate. |
 | `--export-kml FILE` `--export-geojson FILE` | Map export. |
 | `--top N` | Row limit for creeps, channels, vendors. Default 20. |
@@ -172,7 +184,7 @@ python3 wigle_processor.py d1.csv d2.csv --merge all.csv --export-kml map.kml
 - Blocked SSIDs are case-sensitive; MACs are not.
 - Creep locations are ~1 km grid cells, not points.
 - Hidden and blank SSIDs are invisible to evil-twin detection.
-- Randomized MACs come back `Unknown` and never accumulate locations.
+- Randomized MACs are excluded from vendor stats and never accumulate creep locations.
 - Dedup needs an exact position match.
 - Option 7 parses `YYYY-MM-DD HH:MM:SS` and `MM/DD/YYYY HH:MM:SS` only.
 - Evil twins are a heuristic. A venue with mixed-vendor APs looks the same as an attack.
